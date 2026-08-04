@@ -26,7 +26,7 @@ if (existingUser.rows.length > 0) {
 
   const password_hash = await bcrypt.hash(password, 10);
 
-  const user = await withTransaction(async (client) => {
+  const registerResult = await withTransaction(async (client) => {
     const result = await client.query(
       `INSERT INTO users (email, password_hash, full_name)
        VALUES ($1, $2, $3)
@@ -36,16 +36,25 @@ if (existingUser.rows.length > 0) {
 
     const userId = result.rows[0].id;
 
-  await client.query(
-  `INSERT INTO wallets (user_id)
-   VALUES ($1)`,
-  [userId]
-);
+    const walletResult = await client.query<{ id: string }>(
+      `INSERT INTO wallets (user_id)
+       VALUES ($1)
+       RETURNING id`,
+      [userId]
+    );
 
-    return result.rows[0];
+    const walletId = walletResult.rows[0].id;
+
+    await client.query(
+      `INSERT INTO balances (wallet_id, currency_code, amount)
+       SELECT $1, code, 0.00000000 FROM currencies`,
+      [walletId]
+    );
+
+    return { user: result.rows[0], walletId };
   });
 
-  return res.status(201).json({ user });
+  return res.status(201).json(registerResult);
 });
 
 export { router as authRouter };
