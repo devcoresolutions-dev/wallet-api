@@ -6,11 +6,12 @@ import { AppError } from '../utils/AppError';
 import { getExchangeRate } from '../services/exchangeRate.service';
 import { executeBuy } from '../services/transaction.service';
 import { withTransaction } from '../config/database';
+import { authenticate } from '../middlewares/authenticate';
+import * as walletModel from '../models/wallet.model';
 
 const router = Router();
 
 const buySchema = z.object({
-  walletId: z.string().uuid(),
   fromCurrency: z.string().length(3),
   toCurrency: z.string().length(3),
   fromAmount: z.string().refine((value) => {
@@ -22,8 +23,8 @@ const buySchema = z.object({
   }, { message: 'fromAmount must be a positive decimal string' }),
 });
 
-router.post('/buy', async (req, res) => {
-  const { walletId, fromCurrency, toCurrency, fromAmount } = buySchema.parse(req.body);
+router.post('/buy', authenticate, async (req, res) => {
+  const { fromCurrency, toCurrency, fromAmount } = buySchema.parse(req.body);
 
   const baseCurrency = fromCurrency.toUpperCase();
   const targetCurrency = toCurrency.toUpperCase();
@@ -31,6 +32,14 @@ router.post('/buy', async (req, res) => {
   if (baseCurrency === targetCurrency) {
     throw new AppError(400, 'VALIDATION_ERROR', 'fromCurrency and toCurrency must be different');
   }
+
+  // walletId se deriva del usuario autenticado, nunca del body: así nadie
+  // puede operar una wallet ajena aunque conozca su UUID.
+  const wallet = await walletModel.findByUserId(req.userId as string);
+  if (!wallet) {
+    throw new AppError(404, 'WALLET_NOT_FOUND', 'No wallet found for the authenticated user');
+  }
+  const walletId = wallet.id;
 
   const transactionResult = await withTransaction(async (client) => {
     const exchangeRate = new Decimal(await getExchangeRate(baseCurrency, targetCurrency));
