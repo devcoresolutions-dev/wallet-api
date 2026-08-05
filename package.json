@@ -6,6 +6,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
+    "migrate": "tsx src/db/migrate.ts",
     "test": "vitest",
     "lint": "eslint ."
   },
