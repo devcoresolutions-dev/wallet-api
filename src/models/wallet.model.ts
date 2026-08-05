@@ -1,4 +1,17 @@
 import { PoolClient } from 'pg';
+import { pool } from '../config/database';
+
+/**
+ * Busca la wallet de un usuario a partir de su id.
+ * Se usa para derivar walletId del token en vez de confiar en el body.
+ */
+export async function findByUserId(userId: string): Promise<{ id: string } | null> {
+    const result = await pool.query<{ id: string }>(
+        'SELECT id FROM wallets WHERE user_id = $1',
+        [userId]
+    );
+    return result.rows[0] ?? null;
+}
 
 export async function createWithBalances(
     client: PoolClient,
