@@ -33,6 +33,21 @@ function toAuthResult(user: userModel.UserRow): AuthResult {
     };
 }
 
+export async function getMe(userId: string) {
+    const user = await userModel.findById(userId);
+
+    if (!user) {
+        throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+    }
+
+    return {
+        id: user.id,
+        email: user.email,
+        fullName: user.full_name,
+    };
+}
+
+
 export async function register(input: RegisterInput): Promise<AuthResult> {
     const existing = await userModel.findByEmail(input.email);
     if (existing) {
