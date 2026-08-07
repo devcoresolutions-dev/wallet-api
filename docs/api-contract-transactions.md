@@ -85,6 +85,9 @@ Ejecuta la operación. Debita de la moneda origen y acredita en la destino.
       "fromAmount": "150000.00"
     }
 
+La wallet se deriva del usuario autenticado a partir del token — no se envía en
+el body. Esto evita que alguien opere una wallet ajena conociendo su UUID.
+
 ### Respuesta 201
 
     {
@@ -232,8 +235,12 @@ evitar XSS derivado del modelo.
 | Endpoint | Estado | Responsable |
 |---|---|---|
 | `POST /api/transactions/quote` | ⏳ Pendiente | — |
-| `POST /api/transactions/buy` | ⏳ Pendiente | Andrés |
+| `POST /api/transactions/buy` | ✅ Implementado | Andrés |
 | `POST /api/transactions/sell` | ⏳ Pendiente | Juampi |
 | `POST /api/transactions/exchange` | ⏳ Pendiente | Juampi |
 | `GET /api/transactions` | ⏳ Pendiente | — |
 | `POST /api/chat` | ⏳ Pendiente | Juampi |
+
+El `/buy` está deployado en Railway y verificado. El resto de las operaciones
+(`quote`, `sell`, `exchange`) y el historial siguen sin implementar.
+
