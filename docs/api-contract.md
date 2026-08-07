@@ -1,4 +1,3 @@
-
 # Contrato de la API — Sprint 1
 
 Documento de referencia para el equipo de frontend. Define qué endpoints existen,
@@ -9,7 +8,7 @@ qué reciben y qué devuelven.
 ### Base URL
 
     Desarrollo:  http://localhost:3000/api
-    Producción:  https://[url-de-railway]/api
+    Producción:  https://wallet-api-production.up.railway.app/api
 
 ### Autenticación
 
@@ -111,7 +110,34 @@ contraseña incorrecta. Distinguirlos permitiría averiguar qué cuentas existen
 
 ---
 
-## 3. Listar monedas
+## 3. Usuario autenticado
+
+    GET /api/auth/me
+
+Requiere token.
+
+### Respuesta 200
+
+    {
+      "user": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "email": "juan@ejemplo.com",
+        "fullName": "Juan Pablo Arnez"
+      }
+    }
+
+Misma forma que el campo `user` de register y login, para que el frontend
+reutilice el mismo tipo.
+
+### Errores
+
+| HTTP | error | Cuándo |
+|---|---|---|
+| 404 | `USER_NOT_FOUND` | El token es válido pero el usuario ya no existe |
+
+---
+
+## 4. Listar monedas
 
     GET /api/currencies
 
@@ -139,7 +165,7 @@ chileno no usa decimales — se muestra `$15.000`, no `$15.000,00`.
 
 ---
 
-## 4. Balances del usuario
+## 5. Balances del usuario
 
     GET /api/wallet/balances
 
@@ -176,13 +202,44 @@ para mostrar, y si necesita operar usa una librería de precisión decimal.
 
 ---
 
+## 6. Tasas de cambio
+
+    GET /api/rates/:base/:target
+
+Pública. Ejemplo: `/api/rates/USD/ARS`.
+
+### Respuesta 200
+
+    {
+      "base": "USD",
+      "target": "ARS",
+      "rate": 1450.25
+    }
+
+La tasa se obtiene de Frankfurter y se cachea. Ver `exchange-rates-api.md` para
+el detalle del proveedor y la política de caché.
+
+---
+
+## 7. Comprar moneda
+
+    POST /api/transactions/buy
+
+Requiere token. La wallet se deriva del usuario autenticado — no se envía en el body.
+
+Ver `api-contract-transactions.md` para el detalle completo de request, respuesta
+y reglas de negocio.
+
+---
+
 ## Notas para el frontend
 
-- El token se guarda en estado de React, no en localStorage. Si el usuario recarga
-  la página, vuelve al login. Es suficiente para el alcance del Sprint 1.
-- Los datos del usuario vienen en la respuesta del login, no hay que pedirlos aparte.
-- Mientras el backend no exista, se puede trabajar contra respuestas simuladas con
-  estas mismas estructuras. Al conectar los endpoints reales solo cambia la fuente.
+- El token se guarda en `localStorage` bajo la clave `token`. Permite que la sesión
+  sobreviva a un refresh de la página.
+- Los datos del usuario vienen en la respuesta del login y del registro, no hay que
+  pedirlos aparte. `GET /api/auth/me` sirve para recuperarlos al recargar.
+- Mientras un endpoint no exista, se puede trabajar contra respuestas simuladas con
+  estas mismas estructuras. Al conectar el endpoint real solo cambia la fuente.
 
 ---
 
@@ -191,7 +248,13 @@ para mostrar, y si necesita operar usa una librería de precisión decimal.
 | Endpoint | Estado | Responsable |
 |---|---|---|
 | `GET /api/health` | ✅ Implementado | Juampi |
-| `POST /api/auth/register` | ⏳ Pendiente | Andrés |
-| `POST /api/auth/login` | ⏳ Pendiente | Juampi |
+| `POST /api/auth/register` | ✅ Implementado | Andrés / Juampi |
+| `POST /api/auth/login` | ✅ Implementado | Juampi |
+| `GET /api/auth/me` | ✅ Implementado | Juampi |
+| `GET /api/rates/:base/:target` | ✅ Implementado | Andrés |
+| `POST /api/transactions/buy` | ✅ Implementado | Andrés |
 | `GET /api/currencies` | ⏳ Pendiente | Andrés |
 | `GET /api/wallet/balances` | ⏳ Pendiente | Andrés |
+| `GET /api/transactions` | ⏳ Pendiente (ver api-contract-transactions.md) | Sin asignar |
+
+Todo lo implementado está deployado en Railway y verificado en producción.
