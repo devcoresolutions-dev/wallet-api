@@ -14,6 +14,7 @@ import {
 import { withTransaction } from '../config/database';
 import { authenticate } from '../middlewares/authenticate';
 import * as walletModel from '../models/wallet.model';
+import { assertCurrenciesActive } from '../models/currency.model';
 
 const router = Router();
 
@@ -53,6 +54,11 @@ function registerConversionRoute(path: string, execute: ConversionExecutor): voi
       throw new AppError(400, 'VALIDATION_ERROR', 'fromCurrency and toCurrency must be different');
     }
 
+    // Falla rápido y con un 400 claro si el cliente mandó un código que no
+    // existe o que dimos de baja, en vez de dejar que el typo llegue crudo
+    // hasta Frankfurter o hasta un INSERT/UPDATE contra la DB.
+    await assertCurrenciesActive([baseCurrency, targetCurrency]);
+
     // walletId se deriva del usuario autenticado, nunca del body: así nadie
     // puede operar una wallet ajena aunque conozca su UUID.
     const wallet = await walletModel.findByUserId(req.userId as string);
@@ -62,7 +68,12 @@ function registerConversionRoute(path: string, execute: ConversionExecutor): voi
     const walletId = wallet.id;
 
     const result = await withTransaction(async (client) => {
-      const exchangeRate = new Decimal(await getExchangeRate(baseCurrency, targetCurrency));
+      let exchangeRate: Decimal;
+      try {
+        exchangeRate = new Decimal(await getExchangeRate(baseCurrency, targetCurrency));
+      } catch {
+        throw new AppError(502, 'RATE_UNAVAILABLE', 'Could not fetch exchange rate at this time');
+      }
       const conversionResult = await execute(client, {
         walletId,
         fromCurrency: baseCurrency,

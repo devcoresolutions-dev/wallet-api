@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { pool } from '../config/database';
 import { AppError } from '../utils/AppError';
 
 interface CurrencyRow {
@@ -22,4 +23,31 @@ export async function getDecimals(client: PoolClient, currencyCode: string): Pro
   }
 
   return result.rows[0].decimals;
+}
+
+/**
+ * Valida que todos los códigos recibidos existan y estén activos, antes de
+ * pedir la tasa de cambio o tocar balances. Sin este chequeo, un código
+ * inválido (typo del cliente, moneda dada de baja) llegaba crudo hasta
+ * Frankfurter o hasta un INSERT/UPDATE contra la DB y terminaba en un 500
+ * genérico en vez de un error 400 claro para quien llama a la API.
+ */
+export async function assertCurrenciesActive(codes: string[]): Promise<void> {
+  const uniqueCodes = [...new Set(codes)];
+
+  const result = await pool.query<{ code: string }>(
+    `SELECT code FROM currencies WHERE code = ANY($1) AND is_active = true`,
+    [uniqueCodes]
+  );
+
+  const found = new Set(result.rows.map((row) => row.code));
+  const missing = uniqueCodes.filter((code) => !found.has(code));
+
+  if (missing.length > 0) {
+    throw new AppError(
+      400,
+      'INVALID_CURRENCY',
+      `Unknown or inactive currency code(s): ${missing.join(', ')}`
+    );
+  }
 }
