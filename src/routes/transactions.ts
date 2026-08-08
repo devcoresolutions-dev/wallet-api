@@ -42,14 +42,19 @@ router.post('/buy', authenticate, async (req, res) => {
   const walletId = wallet.id;
 
   const transactionResult = await withTransaction(async (client) => {
-    const exchangeRate = new Decimal(await getExchangeRate(baseCurrency, targetCurrency));
+    // 1. Extraemos rate (como string) y source del servicio
+    const { rate, source } = await getExchangeRate(baseCurrency, targetCurrency);
+
+    // 2. Instanciamos Decimal con el string directo, eliminando errores de punto flotante
+    const exchangeRate = new Decimal(rate);
+
     const buyResult = await executeBuy(client, {
       walletId,
       fromCurrency: baseCurrency,
       toCurrency: targetCurrency,
       fromAmount: new Decimal(fromAmount),
       exchangeRate,
-      rateSource: 'frankfurter',
+      rateSource: source, // 3. Ahora el source es dinámico, no hardcodeado
     });
 
     const balances = await getUpdatedBalances(client, walletId, [baseCurrency, targetCurrency]);
