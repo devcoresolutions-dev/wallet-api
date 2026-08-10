@@ -17,6 +17,14 @@ export async function findByEmail(email: string): Promise<UserRow | null> {
     return result.rows[0] ?? null;
 }
 
+export async function findById(id: string): Promise<UserRow | null> {
+    const result = await pool.query<UserRow>(
+        'SELECT * FROM users WHERE id = $1',
+        [id]
+    );
+    return result.rows[0] ?? null;
+}
+
 export async function create(
     client: PoolClient,
     email: string,

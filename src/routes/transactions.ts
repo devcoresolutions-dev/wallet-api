@@ -37,14 +37,6 @@ type ConversionExecutor = (
 
 /**
  * Da de alta una ruta de conversión (BUY/SELL/EXCHANGE). Las tres comparten
- * la misma validación, la misma resolución de wallet/tasa y, sobre todo, la
- * misma garantía de atomicidad: todo el trabajo (leer la tasa recién
- * obtenida, bloquear balances, insertar la cabecera, debitar, acreditar y
- * escribir el ledger) corre dentro de una única transacción SQL vía
- * `withTransaction` — o se confirma todo, o no se confirma nada.
- */
-/**
- * Da de alta una ruta de conversión (BUY/SELL/EXCHANGE). Las tres comparten
  * la misma validación, la misma resolución de wallet y la misma garantía de
  * atomicidad: bloquear balances, insertar la cabecera, debitar, acreditar y
  * escribir el ledger corren dentro de una única transacción SQL vía
@@ -77,12 +69,13 @@ function registerConversionRoute(path: string, execute: ConversionExecutor): voi
     // La cotización se pide fuera de la transacción SQL: si la API externa
     // tarda, no queremos mantener abierta una transacción reteniendo una
     // conexión del pool ni los locks de los balances.
-    let exchangeRate: Decimal;
-    try {
-      exchangeRate = new Decimal(await getExchangeRate(baseCurrency, targetCurrency));
-    } catch {
-      throw new AppError(503, 'RATE_UNAVAILABLE', 'Could not fetch exchange rate at this time');
-    }
+    //
+    // El rate viene como string desde el service: construir el Decimal
+    // directamente desde ahí evita degradar el NUMERIC(20,8) al punto
+    // flotante de JavaScript. El source es dinámico — puede ser el proveedor
+    // principal o el de respaldo, según cuál respondió.
+    const { rate, source } = await getExchangeRate(baseCurrency, targetCurrency);
+    const exchangeRate = new Decimal(rate);
 
     const result = await withTransaction(async (client) => {
       const conversionResult = await execute(client, {
@@ -91,7 +84,7 @@ function registerConversionRoute(path: string, execute: ConversionExecutor): voi
         toCurrency: targetCurrency,
         fromAmount: new Decimal(fromAmount),
         exchangeRate,
-        rateSource: 'frankfurter',
+        rateSource: source,
       });
 
       // Los balances actualizados se leen dentro de la misma transacción,

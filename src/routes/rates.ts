@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { getExchangeRate } from '../services/exchangeRate.service';
-import { AppError } from '../utils/AppError';
+
 
 const router = Router();
 
@@ -16,16 +16,16 @@ router.get('/:base/:target', async (req, res) => {
   const baseCurrency = base.toUpperCase();
   const targetCurrency = target.toUpperCase();
 
-  try {
-    const rate = await getExchangeRate(baseCurrency, targetCurrency);
-    return res.json({ base: baseCurrency, target: targetCurrency, rate });
-  } catch {
-    throw new AppError(
-      502,
-      'RATE_UNAVAILABLE',
-      'Could not fetch exchange rate at this time'
-    );
-  }
+  // Ahora getExchangeRate devuelve el objeto RateResult completo
+  const { rate, ageMinutes, source } = await getExchangeRate(baseCurrency, targetCurrency);
+
+  return res.json({
+    base: baseCurrency,
+    target: targetCurrency,
+    rate,
+    rateAgeMinutes: ageMinutes,
+    source
+  });
 });
 
 export { router as ratesRouter };
