@@ -43,6 +43,13 @@ type ConversionExecutor = (
  * escribir el ledger) corre dentro de una única transacción SQL vía
  * `withTransaction` — o se confirma todo, o no se confirma nada.
  */
+/**
+ * Da de alta una ruta de conversión (BUY/SELL/EXCHANGE). Las tres comparten
+ * la misma validación, la misma resolución de wallet y la misma garantía de
+ * atomicidad: bloquear balances, insertar la cabecera, debitar, acreditar y
+ * escribir el ledger corren dentro de una única transacción SQL vía
+ * `withTransaction` — o se confirma todo, o no se confirma nada.
+ */
 function registerConversionRoute(path: string, execute: ConversionExecutor): void {
   router.post(path, authenticate, async (req, res) => {
     const { fromCurrency, toCurrency, fromAmount } = conversionSchema.parse(req.body);
@@ -67,13 +74,17 @@ function registerConversionRoute(path: string, execute: ConversionExecutor): voi
     }
     const walletId = wallet.id;
 
+    // La cotización se pide fuera de la transacción SQL: si la API externa
+    // tarda, no queremos mantener abierta una transacción reteniendo una
+    // conexión del pool ni los locks de los balances.
+    let exchangeRate: Decimal;
+    try {
+      exchangeRate = new Decimal(await getExchangeRate(baseCurrency, targetCurrency));
+    } catch {
+      throw new AppError(503, 'RATE_UNAVAILABLE', 'Could not fetch exchange rate at this time');
+    }
+
     const result = await withTransaction(async (client) => {
-      let exchangeRate: Decimal;
-      try {
-        exchangeRate = new Decimal(await getExchangeRate(baseCurrency, targetCurrency));
-      } catch {
-        throw new AppError(502, 'RATE_UNAVAILABLE', 'Could not fetch exchange rate at this time');
-      }
       const conversionResult = await execute(client, {
         walletId,
         fromCurrency: baseCurrency,
