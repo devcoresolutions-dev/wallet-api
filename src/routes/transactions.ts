@@ -4,7 +4,7 @@ import { z } from 'zod';
 import Decimal from 'decimal.js';
 import { AppError } from '../utils/AppError';
 import { getExchangeRate } from '../services/exchangeRate.service';
-import { executeBuy } from '../services/transaction.service';
+import { executeBuy, listTransactions } from '../services/transaction.service';
 import { withTransaction } from '../config/database';
 import { authenticate } from '../middlewares/authenticate';
 import * as walletModel from '../models/wallet.model';
@@ -21,6 +21,13 @@ const buySchema = z.object({
       return false;
     }
   }, { message: 'fromAmount must be a positive decimal string' }),
+});
+
+const listQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  type: z.enum(['BUY', 'SELL', 'EXCHANGE']).optional(),
+  currency: z.string().length(3).optional(),
 });
 
 router.post('/buy', authenticate, async (req, res) => {
@@ -42,10 +49,7 @@ router.post('/buy', authenticate, async (req, res) => {
   const walletId = wallet.id;
 
   const transactionResult = await withTransaction(async (client) => {
-    // 1. Extraemos rate (como string) y source del servicio
     const { rate, source } = await getExchangeRate(baseCurrency, targetCurrency);
-
-    // 2. Instanciamos Decimal con el string directo, eliminando errores de punto flotante
     const exchangeRate = new Decimal(rate);
 
     const buyResult = await executeBuy(client, {
@@ -54,7 +58,7 @@ router.post('/buy', authenticate, async (req, res) => {
       toCurrency: targetCurrency,
       fromAmount: new Decimal(fromAmount),
       exchangeRate,
-      rateSource: source, // 3. Ahora el source es dinámico, no hardcodeado
+      rateSource: source,
     });
 
     const balances = await getUpdatedBalances(client, walletId, [baseCurrency, targetCurrency]);
@@ -66,6 +70,24 @@ router.post('/buy', authenticate, async (req, res) => {
     transaction: transactionResult.buyResult.transaction,
     balances: transactionResult.balances,
   });
+});
+
+router.get('/', authenticate, async (req, res) => {
+  const { page, limit, type, currency } = listQuerySchema.parse(req.query);
+
+  const wallet = await walletModel.findByUserId(req.userId as string);
+  if (!wallet) {
+    throw new AppError(404, 'WALLET_NOT_FOUND', 'No wallet found for the authenticated user');
+  }
+
+  const result = await listTransactions(wallet.id, {
+    page,
+    limit,
+    type,
+    currency: currency?.toUpperCase(),
+  });
+
+  return res.json(result);
 });
 
 async function getUpdatedBalances(
