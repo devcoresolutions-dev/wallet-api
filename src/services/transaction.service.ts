@@ -186,9 +186,19 @@ async function executeConversion(
   const toAmount = netAmount.times(exchangeRate);
   const totalToDebit = fromAmount; // neto + comisión (si la hay) = fromAmount original
 
-  // 2. Bloquear ambos balances (origen y destino)
-  const fromBalance = await getBalanceForUpdate(client, walletId, fromCurrency);
-  const toBalance = await getBalanceForUpdate(client, walletId, toCurrency);
+  // 2. Bloquear ambos balances, siempre en el mismo orden alfabético.
+  //    Si dos operaciones cruzadas sobre el mismo par (USD→EUR y EUR→USD)
+  //    tomaran los locks en orden distinto, cada una quedaría esperando el
+  //    que tiene la otra: deadlock. Con un orden fijo, la segunda espera a
+  //    que la primera termine.
+  const [firstCurrency] = [fromCurrency, toCurrency].sort();
+  const secondCurrency = firstCurrency === fromCurrency ? toCurrency : fromCurrency;
+
+  const firstBalance = await getBalanceForUpdate(client, walletId, firstCurrency);
+  const secondBalance = await getBalanceForUpdate(client, walletId, secondCurrency);
+
+  const fromBalance = firstCurrency === fromCurrency ? firstBalance : secondBalance;
+  const toBalance = firstCurrency === fromCurrency ? secondBalance : firstBalance;
 
   // 3. Crear el registro cabecera de la transacción
   const feeRate = applyFee ? FEE_RATE : NO_FEE;
