@@ -11,16 +11,24 @@ import { pool } from '../../src/config/database';
 import { getExchangeRate } from '../../src/services/exchangeRate.service';
 
 type FetchMock = ReturnType<typeof vi.fn>;
-
 const mockedQuery = pool.query as unknown as FetchMock;
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
-function cacheRow(rate: string, fetchedAt: Date) {
-  return { rows: [{ rate, fetched_at: fetchedAt }] };
+// El SELECT del caché trae también `provider`, que alimenta el campo
+// `source` del resultado.
+function cacheRow(rate: string, fetchedAt: Date, provider = 'frankfurter') {
+  return { rows: [{ rate, fetched_at: fetchedAt, provider }] };
 }
 
 const EMPTY_CACHE = { rows: [] };
+
+// El UPSERT devuelve la fila guardada (RETURNING rate, fetched_at, provider),
+// así el service usa el timestamp real de Postgres y el rate tal como quedó
+// en la columna NUMERIC.
+function savedRow(rate: string, provider = 'frankfurter') {
+  return { rows: [{ rate, fetched_at: new Date(), provider }] };
+}
 
 function mockFrankfurterOk(rate: number) {
   vi.stubGlobal(
@@ -48,10 +56,39 @@ function mockFrankfurterNetworkError() {
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
 }
 
+// Frankfurter falla, el proveedor de respaldo responde. Se distinguen por
+// la URL: el primero pega a api.frankfurter.dev, el segundo a open.er-api.com.
+function mockFrankfurterFailsErApiOk(rate: number) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('frankfurter')) {
+        throw new Error('network down');
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          result: 'success',
+          base_code: 'USD',
+          rates: { ARS: rate, EUR: rate, BRL: rate, MXN: rate, COP: rate, PEN: rate, CLP: rate },
+        }),
+      };
+    })
+  );
+}
+
+// Los dos proveedores caídos: es el único caso en que se recurre al caché
+// rancio o se bloquea la operación.
+function mockBothProvidersFail() {
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+}
+
 describe('exchangeRate.service — getExchangeRate', () => {
   beforeEach(() => {
     mockedQuery.mockReset();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => { });
+    vi.spyOn(console, 'error').mockImplementation(() => { });
   });
 
   afterEach(() => {
@@ -60,31 +97,36 @@ describe('exchangeRate.service — getExchangeRate', () => {
   });
 
   describe('expiración del caché', () => {
-    it('usa la tasa cacheada sin llamar a Frankfurter si tiene menos de 1 hora', async () => {
+    it('usa la tasa cacheada sin llamar a ningún proveedor si tiene menos de 1 hora', async () => {
       const fetchedAt = new Date(Date.now() - 30 * 60 * 1000); // 30 min, dentro del TTL
       mockedQuery.mockResolvedValueOnce(cacheRow('1420.50000000', fetchedAt));
       mockFrankfurterOk(9999); // si se llamara, lo notaríamos por el valor devuelto
 
-      const rate = await getExchangeRate('USD', 'ARS');
+      const result = await getExchangeRate('USD', 'ARS');
 
-      expect(rate).toBe(1420.5);
+      expect(result.rate).toBe('1420.50000000');
+      expect(result.source).toBe('frankfurter');
+      expect(result.ageMinutes).toBe(30);
       expect(fetch).not.toHaveBeenCalled();
       // Tampoco debería haber intentado actualizar el caché.
       expect(mockedQuery).toHaveBeenCalledTimes(1);
     });
 
-    it('vuelve a consultar Frankfurter cuando el caché tiene más de 1 hora', async () => {
+    it('vuelve a consultar el proveedor cuando el caché tiene más de 1 hora', async () => {
       const fetchedAt = new Date(Date.now() - 90 * 60 * 1000); // 90 min, vencido
       mockedQuery
         .mockResolvedValueOnce(cacheRow('1420.50000000', fetchedAt)) // SELECT
-        .mockResolvedValueOnce({ rows: [] }); // UPSERT del nuevo valor
+        .mockResolvedValueOnce(savedRow('1450.75000000')); // UPSERT
+
       mockFrankfurterOk(1450.75);
 
-      const rate = await getExchangeRate('USD', 'ARS');
+      const result = await getExchangeRate('USD', 'ARS');
 
-      expect(rate).toBe(1450.75);
+      expect(result.rate).toBe('1450.75000000');
+      expect(result.ageMinutes).toBe(0); // recién traído
       expect(fetch).toHaveBeenCalledTimes(1);
       expect(fetch).toHaveBeenCalledWith('https://api.frankfurter.dev/v2/rate/USD/ARS');
+
       // SELECT + UPSERT: el caché se refrescó con el valor nuevo.
       expect(mockedQuery).toHaveBeenCalledTimes(2);
       const upsertCall = mockedQuery.mock.calls[1];
@@ -94,68 +136,102 @@ describe('exchangeRate.service — getExchangeRate', () => {
 
     it('trata como vencido un caché de exactamente 1 hora (el límite no es "fresco")', async () => {
       const fetchedAt = new Date(Date.now() - ONE_HOUR_MS - 1);
-      mockedQuery.mockResolvedValueOnce(cacheRow('1000', fetchedAt)).mockResolvedValueOnce({
-        rows: [],
-      });
+      mockedQuery
+        .mockResolvedValueOnce(cacheRow('1000', fetchedAt))
+        .mockResolvedValueOnce(savedRow('1111'));
+
       mockFrankfurterOk(1111);
 
-      const rate = await getExchangeRate('USD', 'EUR');
+      const result = await getExchangeRate('USD', 'EUR');
 
-      expect(rate).toBe(1111);
+      expect(result.rate).toBe('1111');
       expect(fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('sin caché previo, consulta Frankfurter y guarda el resultado', async () => {
-      mockedQuery.mockResolvedValueOnce(EMPTY_CACHE).mockResolvedValueOnce({ rows: [] });
+    it('sin caché previo, consulta el proveedor y guarda el resultado', async () => {
+      mockedQuery
+        .mockResolvedValueOnce(EMPTY_CACHE)
+        .mockResolvedValueOnce(savedRow('1234.50000000'));
+
       mockFrankfurterOk(1234.5);
 
-      const rate = await getExchangeRate('USD', 'BRL');
+      const result = await getExchangeRate('USD', 'BRL');
 
-      expect(rate).toBe(1234.5);
+      expect(result.rate).toBe('1234.50000000');
       expect(fetch).toHaveBeenCalledTimes(1);
       expect(mockedQuery).toHaveBeenCalledTimes(2);
     });
   });
 
-  describe('comportamiento cuando Frankfurter falla', () => {
-    it('si Frankfurter responde con error HTTP y hay un caché vencido, usa la tasa vieja como último recurso', async () => {
-      const fetchedAt = new Date(Date.now() - 5 * ONE_HOUR_MS); // muy vencido, igual se usa
+  describe('fallback al proveedor de respaldo', () => {
+    it('si Frankfurter falla, consulta ExchangeRate-API y marca el source', async () => {
+      mockedQuery
+        .mockResolvedValueOnce(EMPTY_CACHE)
+        .mockResolvedValueOnce(savedRow('1500.00000000', 'exchangerate-api'));
+
+      mockFrankfurterFailsErApiOk(1500);
+
+      const result = await getExchangeRate('USD', 'ARS');
+
+      expect(result.rate).toBe('1500.00000000');
+      expect(result.source).toBe('exchangerate-api');
+      // Los dos proveedores se intentaron, en orden.
+      expect(fetch).toHaveBeenCalledTimes(2);
+
+      const upsertCall = mockedQuery.mock.calls[1];
+      expect(upsertCall[1]).toEqual(['USD', 'ARS', 1500, 'exchangerate-api']);
+    });
+  });
+
+  describe('comportamiento cuando los dos proveedores fallan', () => {
+    it('usa la tasa cacheada rancia si tiene menos de 24 horas, informando la antigüedad', async () => {
+      const fetchedAt = new Date(Date.now() - 5 * ONE_HOUR_MS); // vencido pero dentro de las 24h
       mockedQuery.mockResolvedValueOnce(cacheRow('999.99000000', fetchedAt));
-      mockFrankfurterHttpError(500);
 
-      const rate = await getExchangeRate('USD', 'MXN');
+      mockBothProvidersFail();
 
-      expect(rate).toBe(999.99);
-      expect(console.warn).toHaveBeenCalledTimes(1);
-      // No debe intentar escribir en el caché: el valor stale no cambia.
+      const result = await getExchangeRate('USD', 'MXN');
+
+      expect(result.rate).toBe('999.99000000');
+      expect(result.ageMinutes).toBe(300); // 5 horas
+      // No debe intentar escribir en el caché: el valor rancio no cambia.
       expect(mockedQuery).toHaveBeenCalledTimes(1);
     });
 
-    it('si Frankfurter falla por red y hay un caché vencido, usa la tasa vieja sin lanzar error', async () => {
-      const fetchedAt = new Date(Date.now() - 2 * ONE_HOUR_MS);
+    it('bloquea con RATE_UNAVAILABLE si el caché supera las 24 horas', async () => {
+      const fetchedAt = new Date(Date.now() - 25 * ONE_HOUR_MS);
       mockedQuery.mockResolvedValueOnce(cacheRow('500.00000000', fetchedAt));
-      mockFrankfurterNetworkError();
 
-      const rate = await getExchangeRate('USD', 'COP');
+      mockBothProvidersFail();
 
-      expect(rate).toBe(500);
-      expect(console.warn).toHaveBeenCalledTimes(1);
+      // Nunca se estima ni se extrapola una tasa: es preferible no operar.
+      await expect(getExchangeRate('USD', 'COP')).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'RATE_UNAVAILABLE',
+      });
     });
 
-    it('si Frankfurter falla y no hay ningún caché, propaga el error (la ruta lo traduce a RATE_UNAVAILABLE)', async () => {
+    it('bloquea con RATE_UNAVAILABLE si no hay ningún caché', async () => {
       mockedQuery.mockResolvedValueOnce(EMPTY_CACHE);
-      mockFrankfurterNetworkError();
 
-      await expect(getExchangeRate('USD', 'PEN')).rejects.toThrow('network down');
-      // Nunca se estima ni se inventa una tasa, y no hay nada que cachear.
+      mockBothProvidersFail();
+
+      await expect(getExchangeRate('USD', 'PEN')).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'RATE_UNAVAILABLE',
+      });
+
       expect(mockedQuery).toHaveBeenCalledTimes(1);
     });
 
-    it('si Frankfurter responde con error HTTP y no hay ningún caché, propaga el error', async () => {
+    it('bloquea con RATE_UNAVAILABLE si los proveedores responden con error HTTP y no hay caché', async () => {
       mockedQuery.mockResolvedValueOnce(EMPTY_CACHE);
+
       mockFrankfurterHttpError(503);
 
-      await expect(getExchangeRate('EUR', 'CLP')).rejects.toThrow('Frankfurter API error: 503');
+      await expect(getExchangeRate('EUR', 'CLP')).rejects.toMatchObject({
+        code: 'RATE_UNAVAILABLE',
+      });
     });
   });
 });
