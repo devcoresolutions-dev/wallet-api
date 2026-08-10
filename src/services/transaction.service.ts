@@ -92,7 +92,7 @@ export async function creditBalance(
 /**
  * Inserta un movimiento del ledger (transaction_entries).
  * Cada transacción genera varios de estos: débito de origen,
- * débito de la comisión, crédito de destino.
+ * débito de la comisión (si hay) y crédito de destino.
  */
 export async function insertTransactionEntry(
   client: PoolClient,
@@ -111,18 +111,21 @@ export async function insertTransactionEntry(
   );
 }
 
-interface BuyParams {
+export type TransactionType = 'BUY' | 'SELL' | 'EXCHANGE';
+
+interface TransactionParams {
   walletId: string;
+  type: TransactionType;
   fromCurrency: string;
   toCurrency: string;
-  fromAmount: Decimal; // lo que el usuario quiere gastar
+  fromAmount: Decimal; // lo que el usuario quiere gastar, comisión incluida
   exchangeRate: Decimal;
   rateSource: string;
 }
 
 export interface TransactionSummary {
   id: string;
-  type: 'BUY';
+  type: TransactionType;
   status: 'COMPLETED';
   fromCurrency: string;
   toCurrency: string;
@@ -136,24 +139,56 @@ export interface TransactionSummary {
   createdAt: string;
 }
 
-export interface BuyResult {
+export interface TransactionResult {
   transaction: TransactionSummary;
 }
 
-const FEE_RATE = new Decimal('0.005'); // 0.5%
+const FEE_RATE = new Decimal('0.005');   // 0,5% para BUY y SELL
+const NO_FEE = new Decimal('0');         // EXCHANGE no cobra comisión
 
-export async function executeBuy(client: PoolClient, params: BuyParams): Promise<BuyResult> {
-  const { walletId, fromCurrency, toCurrency, fromAmount, exchangeRate, rateSource } = params;
+/**
+ * La comisión depende del tipo de operación. El intercambio no cobra:
+ * por definición no debe modificar el patrimonio total del usuario,
+ * solo redistribuirlo entre monedas.
+ */
+function feeRateFor(type: TransactionType): Decimal {
+  return type === 'EXCHANGE' ? NO_FEE : FEE_RATE;
+}
+
+/**
+ * Ejecuta una operación de conversión entre dos monedas de la misma wallet.
+ *
+ * BUY, SELL y EXCHANGE comparten la mecánica: debitar el origen, acreditar
+ * el destino y registrar el movimiento en el ledger. Lo único que varía es
+ * la comisión y la etiqueta con la que queda registrada la operación.
+ *
+ * Debe llamarse dentro de withTransaction: las escrituras a balances y al
+ * ledger tienen que confirmarse o revertirse juntas.
+ */
+export async function executeTransaction(
+  client: PoolClient,
+  params: TransactionParams
+): Promise<TransactionResult> {
+  const { walletId, type, fromCurrency, toCurrency, fromAmount, exchangeRate, rateSource } = params;
 
   // 1. Calcular comisión y monto neto
-  const feeAmount = fromAmount.times(FEE_RATE);
+  const feeRate = feeRateFor(type);
+  const feeAmount = fromAmount.times(feeRate);
   const netAmount = fromAmount.minus(feeAmount);
   const toAmount = netAmount.times(exchangeRate);
   const totalToDebit = fromAmount; // neto + comisión = fromAmount original
 
-  // 2. Bloquear ambos balances (origen y destino)
-  const fromBalance = await getBalanceForUpdate(client, walletId, fromCurrency);
-  const toBalance = await getBalanceForUpdate(client, walletId, toCurrency);
+  // 2. Bloquear ambos balances, siempre en el mismo orden alfabético.
+  //    Si dos operaciones cruzadas (USD→EUR y EUR→USD) tomaran los locks
+  //    en orden distinto, cada una esperaría el lock de la otra: deadlock.
+  const [firstCurrency] = [fromCurrency, toCurrency].sort();
+  const secondCurrency = firstCurrency === fromCurrency ? toCurrency : fromCurrency;
+
+  const firstBalance = await getBalanceForUpdate(client, walletId, firstCurrency);
+  const secondBalance = await getBalanceForUpdate(client, walletId, secondCurrency);
+
+  const fromBalance = firstCurrency === fromCurrency ? firstBalance : secondBalance;
+  const toBalance = firstCurrency === fromCurrency ? secondBalance : firstBalance;
 
   // 3. Crear el registro cabecera de la transacción
   const txResult = await client.query<{
@@ -165,10 +200,11 @@ export async function executeBuy(client: PoolClient, params: BuyParams): Promise
        (wallet_id, type, from_currency, to_currency, from_amount, to_amount,
         exchange_rate, fee_amount, fee_currency, fee_rate, rate_source,
         rate_fetched_at, status)
-     VALUES ($1, 'BUY', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), 'COMPLETED')
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), 'COMPLETED')
      RETURNING id, rate_fetched_at, created_at`,
     [
       walletId,
+      type,
       fromCurrency,
       toCurrency,
       fromAmount.toFixed(8),
@@ -176,10 +212,11 @@ export async function executeBuy(client: PoolClient, params: BuyParams): Promise
       exchangeRate.toFixed(8),
       feeAmount.toFixed(8),
       fromCurrency,
-      FEE_RATE.toFixed(5),
+      feeRate.toFixed(5),
       rateSource,
     ]
   );
+
   const transactionId = txResult.rows[0].id;
   const rateFetchedAt = txResult.rows[0].rate_fetched_at.toISOString();
   const createdAt = txResult.rows[0].created_at.toISOString();
@@ -190,22 +227,28 @@ export async function executeBuy(client: PoolClient, params: BuyParams): Promise
   // 5. Acreditar el balance de destino
   const toBalanceAfter = await creditBalance(client, toBalance, toAmount);
 
-  // 6. Registrar los 3 movimientos del ledger
+  // 6. Registrar los movimientos del ledger.
+  //    El asiento de comisión solo existe si hubo comisión: una entrada en
+  //    cero ensucia el libro y complica cualquier auditoría posterior.
   await insertTransactionEntry(client, transactionId, fromBalance.id, 'DEBIT', 'PRINCIPAL', netAmount, fromBalanceAfter);
-  await insertTransactionEntry(client, transactionId, fromBalance.id, 'DEBIT', 'FEE', feeAmount, fromBalanceAfter);
+
+  if (feeAmount.greaterThan(0)) {
+    await insertTransactionEntry(client, transactionId, fromBalance.id, 'DEBIT', 'FEE', feeAmount, fromBalanceAfter);
+  }
+
   await insertTransactionEntry(client, transactionId, toBalance.id, 'CREDIT', 'PRINCIPAL', toAmount, toBalanceAfter);
 
   return {
     transaction: {
       id: transactionId,
-      type: 'BUY',
+      type,
       status: 'COMPLETED',
       fromCurrency,
       toCurrency,
       fromAmount: fromAmount.toFixed(8),
       toAmount: toAmount.toFixed(8),
       feeAmount: feeAmount.toFixed(8),
-      feeRate: FEE_RATE.toFixed(5),
+      feeRate: feeRate.toFixed(5),
       exchangeRate: exchangeRate.toFixed(8),
       rateSource,
       rateFetchedAt,

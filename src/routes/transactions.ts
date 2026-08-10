@@ -1,17 +1,19 @@
 import type { PoolClient } from 'pg';
 import { Router } from 'express';
+import type { Request, Response } from 'express';
 import { z } from 'zod';
 import Decimal from 'decimal.js';
 import { AppError } from '../utils/AppError';
 import { getExchangeRate } from '../services/exchangeRate.service';
-import { executeBuy, listTransactions } from '../services/transaction.service';
+import { executeTransaction, listTransactions } from '../services/transaction.service';
+import type { TransactionType } from '../services/transaction.service';
 import { withTransaction } from '../config/database';
 import { authenticate } from '../middlewares/authenticate';
 import * as walletModel from '../models/wallet.model';
 
 const router = Router();
 
-const buySchema = z.object({
+const operationSchema = z.object({
   fromCurrency: z.string().length(3),
   toCurrency: z.string().length(3),
   fromAmount: z.string().refine((value) => {
@@ -30,47 +32,65 @@ const listQuerySchema = z.object({
   currency: z.string().length(3).optional(),
 });
 
-router.post('/buy', authenticate, async (req, res) => {
-  const { fromCurrency, toCurrency, fromAmount } = buySchema.parse(req.body);
+/**
+ * Las tres operaciones (comprar, vender, intercambiar) comparten el mismo
+ * flujo: validar, derivar la wallet del token, cotizar y ejecutar dentro de
+ * una transacción SQL. Lo único que cambia es el tipo, que determina la
+ * comisión y la etiqueta del registro.
+ *
+ * Esta función genera el handler correspondiente a cada tipo.
+ */
+function makeOperationHandler(type: TransactionType) {
+  return async (req: Request, res: Response) => {
+    const { fromCurrency, toCurrency, fromAmount } = operationSchema.parse(req.body);
 
-  const baseCurrency = fromCurrency.toUpperCase();
-  const targetCurrency = toCurrency.toUpperCase();
+    const baseCurrency = fromCurrency.toUpperCase();
+    const targetCurrency = toCurrency.toUpperCase();
 
-  if (baseCurrency === targetCurrency) {
-    throw new AppError(400, 'VALIDATION_ERROR', 'fromCurrency and toCurrency must be different');
-  }
+    if (baseCurrency === targetCurrency) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'fromCurrency and toCurrency must be different');
+    }
 
-  // walletId se deriva del usuario autenticado, nunca del body: así nadie
-  // puede operar una wallet ajena aunque conozca su UUID.
-  const wallet = await walletModel.findByUserId(req.userId as string);
-  if (!wallet) {
-    throw new AppError(404, 'WALLET_NOT_FOUND', 'No wallet found for the authenticated user');
-  }
-  const walletId = wallet.id;
+    // La wallet se deriva del usuario autenticado, nunca del body: así nadie
+    // puede operar una wallet ajena aunque conozca su UUID.
+    const wallet = await walletModel.findByUserId(req.userId as string);
+    if (!wallet) {
+      throw new AppError(404, 'WALLET_NOT_FOUND', 'No wallet found for the authenticated user');
+    }
+    const walletId = wallet.id;
 
-  const transactionResult = await withTransaction(async (client) => {
+    // La cotización se pide FUERA de la transacción SQL: si la API externa
+    // tarda, no queremos mantener abierta una transacción ni retener una
+    // conexión del pool mientras esperamos.
     const { rate, source } = await getExchangeRate(baseCurrency, targetCurrency);
     const exchangeRate = new Decimal(rate);
 
-    const buyResult = await executeBuy(client, {
-      walletId,
-      fromCurrency: baseCurrency,
-      toCurrency: targetCurrency,
-      fromAmount: new Decimal(fromAmount),
-      exchangeRate,
-      rateSource: source,
+    const result = await withTransaction(async (client) => {
+      const transactionResult = await executeTransaction(client, {
+        walletId,
+        type,
+        fromCurrency: baseCurrency,
+        toCurrency: targetCurrency,
+        fromAmount: new Decimal(fromAmount),
+        exchangeRate,
+        rateSource: source,
+      });
+
+      const balances = await getUpdatedBalances(client, walletId, [baseCurrency, targetCurrency]);
+
+      return { transactionResult, balances };
     });
 
-    const balances = await getUpdatedBalances(client, walletId, [baseCurrency, targetCurrency]);
+    return res.status(201).json({
+      transaction: result.transactionResult.transaction,
+      balances: result.balances,
+    });
+  };
+}
 
-    return { buyResult, balances };
-  });
-
-  return res.status(201).json({
-    transaction: transactionResult.buyResult.transaction,
-    balances: transactionResult.balances,
-  });
-});
+router.post('/buy', authenticate, makeOperationHandler('BUY'));
+router.post('/sell', authenticate, makeOperationHandler('SELL'));
+router.post('/exchange', authenticate, makeOperationHandler('EXCHANGE'));
 
 router.get('/', authenticate, async (req, res) => {
   const { page, limit, type, currency } = listQuerySchema.parse(req.query);
