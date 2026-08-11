@@ -4,6 +4,7 @@ import { ratesRouter } from './rates';
 import { transactionsRouter } from './transactions';
 import { currenciesRouter } from './currencies';
 import { walletRouter } from './wallet';
+import { chatRouter } from './chat';
 
 export const router = Router();
 
@@ -16,3 +17,4 @@ router.use('/rates', ratesRouter);
 router.use('/transactions', transactionsRouter);
 router.use('/currencies', currenciesRouter);
 router.use('/wallet', walletRouter);
+router.use('/chat', chatRouter);
