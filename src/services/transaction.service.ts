@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import Decimal from 'decimal.js';
+import { pool } from '../config/database';
 import { AppError } from '../utils/AppError';
 import { getDecimals } from '../models/currency.model';
 
@@ -318,4 +319,118 @@ export async function executeExchange(
   params: ConversionParams
 ): Promise<ConversionResult> {
   return executeConversion(client, 'EXCHANGE', params);
+}
+
+export interface TransactionListItem {
+  id: string;
+  type: string;
+  status: string;
+  fromCurrency: string;
+  toCurrency: string;
+  fromAmount: string;
+  toAmount: string;
+  feeAmount: string;
+  exchangeRate: string;
+  createdAt: string;
+}
+
+export interface TransactionListResult {
+  transactions: TransactionListItem[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
+interface ListFilters {
+  page: number;
+  limit: number;
+  type?: string;
+  currency?: string;
+}
+
+/**
+ * Devuelve el historial de transacciones de una wallet, paginado y
+ * ordenado de la más reciente a la más antigua.
+ *
+ * Los filtros opcionales se aplican armando la cláusula WHERE de forma
+ * incremental: cada condición agrega su propio placeholder ($1, $2...) en
+ * lugar de concatenar valores en el SQL. Concatenar abriría la puerta a
+ * inyección; los placeholders los escapa el driver.
+ */
+export async function listTransactions(
+  walletId: string,
+  filters: ListFilters
+): Promise<TransactionListResult> {
+  const { page, limit, type, currency } = filters;
+
+  const conditions: string[] = ['wallet_id = $1'];
+  const values: unknown[] = [walletId];
+
+  if (type) {
+    values.push(type);
+    conditions.push(`type = $${values.length}`);
+  }
+
+  if (currency) {
+    values.push(currency);
+    conditions.push(
+      `(from_currency = $${values.length} OR to_currency = $${values.length})`
+    );
+  }
+
+  const where = conditions.join(' AND ');
+
+  // Total de resultados que cumplen los filtros, para calcular las páginas
+  const countResult = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM transactions WHERE ${where}`,
+    values
+  );
+  const total = Number(countResult.rows[0].count);
+
+  // Página solicitada
+  const offset = (page - 1) * limit;
+  const rowsResult = await pool.query<{
+    id: string;
+    type: string;
+    status: string;
+    from_currency: string;
+    to_currency: string;
+    from_amount: string;
+    to_amount: string;
+    fee_amount: string;
+    exchange_rate: string;
+    created_at: Date;
+  }>(
+    `SELECT id, type, status, from_currency, to_currency, from_amount,
+            to_amount, fee_amount, exchange_rate, created_at
+     FROM transactions
+     WHERE ${where}
+     ORDER BY created_at DESC
+     LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+    [...values, limit, offset]
+  );
+
+  return {
+    transactions: rowsResult.rows.map((row) => ({
+      id: row.id,
+      type: row.type,
+      status: row.status,
+      fromCurrency: row.from_currency,
+      toCurrency: row.to_currency,
+      fromAmount: row.from_amount,
+      toAmount: row.to_amount,
+      feeAmount: row.fee_amount,
+      exchangeRate: row.exchange_rate,
+      createdAt: new Date(row.created_at).toISOString(),
+    })),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit) || 1,
+    },
+  };
 }

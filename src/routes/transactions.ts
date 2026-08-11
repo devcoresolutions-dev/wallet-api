@@ -8,6 +8,7 @@ import {
   executeBuy,
   executeExchange,
   executeSell,
+  listTransactions,
   type ConversionParams,
   type ConversionResult,
 } from '../services/transaction.service';
@@ -28,6 +29,13 @@ const conversionSchema = z.object({
       return false;
     }
   }, { message: 'fromAmount must be a positive decimal string' }),
+});
+
+const listQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  type: z.enum(['BUY', 'SELL', 'EXCHANGE']).optional(),
+  currency: z.string().length(3).optional(),
 });
 
 type ConversionExecutor = (
@@ -105,6 +113,24 @@ function registerConversionRoute(path: string, execute: ConversionExecutor): voi
 registerConversionRoute('/buy', executeBuy);
 registerConversionRoute('/sell', executeSell);
 registerConversionRoute('/exchange', executeExchange);
+
+router.get('/', authenticate, async (req, res) => {
+  const { page, limit, type, currency } = listQuerySchema.parse(req.query);
+
+  const wallet = await walletModel.findByUserId(req.userId as string);
+  if (!wallet) {
+    throw new AppError(404, 'WALLET_NOT_FOUND', 'No wallet found for the authenticated user');
+  }
+
+  const result = await listTransactions(wallet.id, {
+    page,
+    limit,
+    type,
+    currency: currency?.toUpperCase(),
+  });
+
+  return res.json(result);
+});
 
 async function getUpdatedBalances(
   client: PoolClient,
