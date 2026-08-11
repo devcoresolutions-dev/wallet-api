@@ -7,6 +7,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   JWT_SECRET: z.string().min(16, 'JWT_SECRET must be at least 16 characters'),
   FRANKFURTER_API_URL: z.string().default('https://api.frankfurter.dev/v2'),
+  GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY is required'),
 });
 
 const parsed = envSchema.safeParse(process.env);
