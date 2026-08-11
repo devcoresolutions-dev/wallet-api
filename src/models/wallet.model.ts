@@ -13,6 +13,31 @@ export async function findByUserId(userId: string): Promise<{ id: string } | nul
     return result.rows[0] ?? null;
 }
 
+export interface BalanceRow {
+    currency_code: string;
+    currency_name: string;
+    symbol: string;
+    decimals: number;
+    amount: string;
+}
+
+/**
+ * Devuelve el balance de la wallet en cada moneda activa. Siempre incluye
+ * las 8 monedas (aunque el amount sea cero) porque se crean todas al
+ * registrar el usuario, en createWithBalances.
+ */
+export async function findBalances(walletId: string): Promise<BalanceRow[]> {
+    const result = await pool.query<BalanceRow>(
+        `SELECT c.code AS currency_code, c.name AS currency_name, c.symbol, c.decimals, b.amount
+     FROM balances b
+     JOIN currencies c ON c.code = b.currency_code
+     WHERE b.wallet_id = $1 AND c.is_active = true
+     ORDER BY c.code`,
+        [walletId]
+    );
+    return result.rows;
+}
+
 export async function createWithBalances(
     client: PoolClient,
     userId: string

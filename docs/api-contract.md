@@ -253,8 +253,8 @@ y reglas de negocio.
 | `GET /api/auth/me` | ✅ Implementado | Juampi |
 | `GET /api/rates/:base/:target` | ✅ Implementado | Andrés |
 | `POST /api/transactions/buy` | ✅ Implementado | Andrés |
-| `GET /api/currencies` | ⏳ Pendiente | Andrés |
-| `GET /api/wallet/balances` | ⏳ Pendiente | Andrés |
+| `GET /api/currencies` | ✅ Implementado | Andrés |
+| `GET /api/wallet/balances` | ✅ Implementado | Andrés |
 | `GET /api/transactions` | ⏳ Pendiente (ver api-contract-transactions.md) | Sin asignar |
 
 Todo lo implementado está deployado en Railway y verificado en producción.

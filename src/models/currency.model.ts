@@ -2,8 +2,23 @@ import type { PoolClient } from 'pg';
 import { pool } from '../config/database';
 import { AppError } from '../utils/AppError';
 
-interface CurrencyRow {
+export interface CurrencyRow {
+  code: string;
+  name: string;
+  symbol: string;
   decimals: number;
+  is_active: boolean;
+}
+
+/**
+ * Devuelve todas las monedas activas, para que el frontend pueda mostrar
+ * el listado y formatear montos según los decimales de cada una.
+ */
+export async function findAllActive(): Promise<CurrencyRow[]> {
+  const result = await pool.query<CurrencyRow>(
+    'SELECT code, name, symbol, decimals, is_active FROM currencies WHERE is_active = true ORDER BY code'
+  );
+  return result.rows;
 }
 
 /**
@@ -13,7 +28,7 @@ interface CurrencyRow {
  * interna de almacenamiento, que siempre es 8 (NUMERIC(20,8)).
  */
 export async function getDecimals(client: PoolClient, currencyCode: string): Promise<number> {
-  const result = await client.query<CurrencyRow>(
+  const result = await client.query<{ decimals: number }>(
     `SELECT decimals FROM currencies WHERE code = $1`,
     [currencyCode]
   );
