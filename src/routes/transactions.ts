@@ -4,14 +4,21 @@ import { z } from 'zod';
 import Decimal from 'decimal.js';
 import { AppError } from '../utils/AppError';
 import { getExchangeRate } from '../services/exchangeRate.service';
-import { executeBuy } from '../services/transaction.service';
+import {
+  executeBuy,
+  executeExchange,
+  executeSell,
+  type ConversionParams,
+  type ConversionResult,
+} from '../services/transaction.service';
 import { withTransaction } from '../config/database';
 import { authenticate } from '../middlewares/authenticate';
 import * as walletModel from '../models/wallet.model';
+import { assertCurrenciesActive } from '../models/currency.model';
 
 const router = Router();
 
-const buySchema = z.object({
+const conversionSchema = z.object({
   fromCurrency: z.string().length(3),
   toCurrency: z.string().length(3),
   fromAmount: z.string().refine((value) => {
@@ -23,50 +30,81 @@ const buySchema = z.object({
   }, { message: 'fromAmount must be a positive decimal string' }),
 });
 
-router.post('/buy', authenticate, async (req, res) => {
-  const { fromCurrency, toCurrency, fromAmount } = buySchema.parse(req.body);
+type ConversionExecutor = (
+  client: PoolClient,
+  params: ConversionParams
+) => Promise<ConversionResult>;
 
-  const baseCurrency = fromCurrency.toUpperCase();
-  const targetCurrency = toCurrency.toUpperCase();
+/**
+ * Da de alta una ruta de conversión (BUY/SELL/EXCHANGE). Las tres comparten
+ * la misma validación, la misma resolución de wallet y la misma garantía de
+ * atomicidad: bloquear balances, insertar la cabecera, debitar, acreditar y
+ * escribir el ledger corren dentro de una única transacción SQL vía
+ * `withTransaction` — o se confirma todo, o no se confirma nada.
+ */
+function registerConversionRoute(path: string, execute: ConversionExecutor): void {
+  router.post(path, authenticate, async (req, res) => {
+    const { fromCurrency, toCurrency, fromAmount } = conversionSchema.parse(req.body);
 
-  if (baseCurrency === targetCurrency) {
-    throw new AppError(400, 'VALIDATION_ERROR', 'fromCurrency and toCurrency must be different');
-  }
+    const baseCurrency = fromCurrency.toUpperCase();
+    const targetCurrency = toCurrency.toUpperCase();
 
-  // walletId se deriva del usuario autenticado, nunca del body: así nadie
-  // puede operar una wallet ajena aunque conozca su UUID.
-  const wallet = await walletModel.findByUserId(req.userId as string);
-  if (!wallet) {
-    throw new AppError(404, 'WALLET_NOT_FOUND', 'No wallet found for the authenticated user');
-  }
-  const walletId = wallet.id;
+    if (baseCurrency === targetCurrency) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'fromCurrency and toCurrency must be different');
+    }
 
-  const transactionResult = await withTransaction(async (client) => {
-    // 1. Extraemos rate (como string) y source del servicio
+    // Falla rápido y con un 400 claro si el cliente mandó un código que no
+    // existe o que dimos de baja, en vez de dejar que el typo llegue crudo
+    // hasta Frankfurter o hasta un INSERT/UPDATE contra la DB.
+    await assertCurrenciesActive([baseCurrency, targetCurrency]);
+
+    // walletId se deriva del usuario autenticado, nunca del body: así nadie
+    // puede operar una wallet ajena aunque conozca su UUID.
+    const wallet = await walletModel.findByUserId(req.userId as string);
+    if (!wallet) {
+      throw new AppError(404, 'WALLET_NOT_FOUND', 'No wallet found for the authenticated user');
+    }
+    const walletId = wallet.id;
+
+    // La cotización se pide fuera de la transacción SQL: si la API externa
+    // tarda, no queremos mantener abierta una transacción reteniendo una
+    // conexión del pool ni los locks de los balances.
+    //
+    // El rate viene como string desde el service: construir el Decimal
+    // directamente desde ahí evita degradar el NUMERIC(20,8) al punto
+    // flotante de JavaScript. El source es dinámico — puede ser el proveedor
+    // principal o el de respaldo, según cuál respondió.
     const { rate, source } = await getExchangeRate(baseCurrency, targetCurrency);
-
-    // 2. Instanciamos Decimal con el string directo, eliminando errores de punto flotante
     const exchangeRate = new Decimal(rate);
 
-    const buyResult = await executeBuy(client, {
-      walletId,
-      fromCurrency: baseCurrency,
-      toCurrency: targetCurrency,
-      fromAmount: new Decimal(fromAmount),
-      exchangeRate,
-      rateSource: source, // 3. Ahora el source es dinámico, no hardcodeado
+    const result = await withTransaction(async (client) => {
+      const conversionResult = await execute(client, {
+        walletId,
+        fromCurrency: baseCurrency,
+        toCurrency: targetCurrency,
+        fromAmount: new Decimal(fromAmount),
+        exchangeRate,
+        rateSource: source,
+      });
+
+      // Los balances actualizados se leen dentro de la misma transacción,
+      // después de debitar/acreditar: reflejan el valor que se acaba de
+      // escribir directamente en `balances`, no una suma del ledger.
+      const balances = await getUpdatedBalances(client, walletId, [baseCurrency, targetCurrency]);
+
+      return { conversionResult, balances };
     });
 
-    const balances = await getUpdatedBalances(client, walletId, [baseCurrency, targetCurrency]);
-
-    return { buyResult, balances };
+    return res.status(201).json({
+      transaction: result.conversionResult.transaction,
+      balances: result.balances,
+    });
   });
+}
 
-  return res.status(201).json({
-    transaction: transactionResult.buyResult.transaction,
-    balances: transactionResult.balances,
-  });
-});
+registerConversionRoute('/buy', executeBuy);
+registerConversionRoute('/sell', executeSell);
+registerConversionRoute('/exchange', executeExchange);
 
 async function getUpdatedBalances(
   client: PoolClient,
