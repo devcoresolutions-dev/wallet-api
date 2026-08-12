@@ -16,6 +16,8 @@ import { withTransaction } from '../config/database';
 import { authenticate } from '../middlewares/authenticate';
 import * as walletModel from '../models/wallet.model';
 import { assertCurrenciesActive } from '../models/currency.model';
+import * as userModel from '../models/user.model';
+import * as emailService from '../services/email.service';
 
 const router = Router();
 
@@ -103,8 +105,33 @@ function registerConversionRoute(path: string, execute: ConversionExecutor): voi
       return { conversionResult, balances };
     });
 
+    const tx = result.conversionResult.transaction;
+
+    // El email va después de que la transacción SQL se confirmó y sin await:
+    // la operación financiera ya está hecha, así que una demora o una caída de
+    // SES no debe hacer esperar al usuario ni afectar el resultado.
+    void (async () => {
+      const user = await userModel.findById(req.userId as string);
+      if (!user) return;
+
+      await emailService.sendEmail({
+        userId: user.id,
+        type: 'TRANSACTION_CONFIRMATION',
+        recipient: user.email,
+        content: await emailService.transactionEmail({
+          fullName: user.full_name,
+          type: tx.type,
+          fromAmount: tx.fromAmount,
+          fromCurrency: tx.fromCurrency,
+          toAmount: tx.toAmount,
+          toCurrency: tx.toCurrency,
+          feeAmount: tx.feeAmount,
+        }),
+      });
+    })();
+
     return res.status(201).json({
-      transaction: result.conversionResult.transaction,
+      transaction: tx,
       balances: result.balances,
     });
   });

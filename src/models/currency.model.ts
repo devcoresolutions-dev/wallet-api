@@ -66,3 +66,19 @@ export async function assertCurrenciesActive(codes: string[]): Promise<void> {
     );
   }
 }
+/**
+ * Igual que getDecimals pero sin transacción: se usa desde contextos que no
+ * están dentro de un withTransaction, como el armado de emails.
+ */
+export async function getDecimalsFor(currencyCode: string): Promise<number> {
+  const result = await pool.query<{ decimals: number }>(
+    `SELECT decimals FROM currencies WHERE code = $1`,
+    [currencyCode]
+  );
+
+  if (result.rows.length === 0) {
+    throw new AppError(404, 'CURRENCY_NOT_FOUND', `Currency ${currencyCode} not found`);
+  }
+
+  return result.rows[0].decimals;
+}
