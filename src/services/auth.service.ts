@@ -6,6 +6,7 @@ import { AppError } from '../utils/AppError';
 import * as userModel from '../models/user.model';
 import * as walletModel from '../models/wallet.model';
 import { LoginInput, RegisterInput } from '../schemas/auth.schemas';
+import * as emailService from './email.service';
 
 const SALT_ROUNDS = 10;
 const TOKEN_EXPIRATION = '24h';
@@ -69,6 +70,17 @@ export async function register(input: RegisterInput): Promise<AuthResult> {
         );
         await walletModel.createWithBalances(client, created.id);
         return created;
+    });
+
+    // El email va fuera de la transacción y sin await: la cuenta ya está creada,
+    // así que una demora o una caída de SES no debe hacer esperar al usuario ni
+    // afectar el registro. sendEmail captura sus propios errores y deja el
+    // intento registrado en notifications para poder reintentarlo.
+    void emailService.sendEmail({
+        userId: user.id,
+        type: 'WELCOME',
+        recipient: user.email,
+        content: emailService.welcomeEmail(user.full_name),
     });
 
     return toAuthResult(user);
