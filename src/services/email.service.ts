@@ -106,7 +106,13 @@ export async function transactionEmail(params: {
     const toAmount = formatAmount(params.toAmount, toDecimals);
 
     const typeLabel =
-        params.type === 'BUY' ? 'Compra' : params.type === 'SELL' ? 'Venta' : 'Intercambio';
+        params.type === 'BUY'
+            ? 'Compra'
+            : params.type === 'SELL'
+                ? 'Venta'
+                : params.type === 'DEPOSIT'
+                    ? 'Depósito'
+                    : 'Intercambio';
 
     const feeRow =
         Number(params.feeAmount) > 0
@@ -116,9 +122,14 @@ export async function transactionEmail(params: {
            <td style="padding:6px 0; text-align:right;">Sin costo</td></tr>`;
 
     return {
-        subject: `${typeLabel} confirmada — Neto Wallet`,
+        subject:
+            params.type === 'DEPOSIT'
+                ? 'Depósito confirmado — Neto Wallet'
+                : `${typeLabel} confirmada — Neto Wallet`,
         body: layout(
-            `${typeLabel} confirmada`,
+            params.type === 'DEPOSIT'
+                ? 'Depósito confirmado'
+                : `${typeLabel} confirmada`,
             `<p style="font-size:14px; color:#444;">Hola ${name}, tu operación se completó.</p>
       <table style="width:100%; font-size:14px; color:#444; border-collapse:collapse;">
         <tr><td style="padding:6px 0; color:#888;">Enviaste</td>

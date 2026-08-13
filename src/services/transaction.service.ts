@@ -121,7 +121,7 @@ export interface ConversionParams {
   rateSource: string;
 }
 
-export type TransactionType = 'BUY' | 'SELL' | 'EXCHANGE';
+export type TransactionType = 'BUY' | 'SELL' | 'EXCHANGE' | 'DEPOSIT';
 
 export interface TransactionSummary {
   id: string;
@@ -431,6 +431,94 @@ export async function listTransactions(
       limit,
       total,
       totalPages: Math.ceil(total / limit) || 1,
+    },
+  };
+}
+
+export interface DepositParams {
+  walletId: string;
+  currency: string;
+  amount: Decimal;
+}
+
+const MAX_DEPOSIT = new Decimal('1000000');
+
+/**
+ * Acredita fondos en una moneda de la wallet.
+ *
+ * En una billetera real el depósito vendría de una transferencia bancaria o
+ * una tarjeta; acá es una acreditación directa, pensada para cargar saldo de
+ * prueba. El tope existe para que nadie se acredite montos absurdos por error.
+ *
+ * Se registra en la misma tabla que las conversiones para que el historial del
+ * usuario sea uno solo, con from_currency = to_currency y exchange_rate = 1:
+ * no hay conversión, entra y queda en la misma moneda.
+ *
+ * Debe llamarse dentro de withTransaction.
+ */
+export async function executeDeposit(
+  client: PoolClient,
+  params: DepositParams
+): Promise<ConversionResult> {
+  const { walletId, currency, amount } = params;
+
+  if (amount.greaterThan(MAX_DEPOSIT)) {
+    throw new AppError(
+      400,
+      'DEPOSIT_LIMIT_EXCEEDED',
+      `El depósito máximo es ${MAX_DEPOSIT.toFixed(2)} por operación`
+    );
+  }
+
+  // Se bloquea el balance aunque solo vayamos a acreditar: si dos depósitos
+  // simultáneos leyeran el mismo saldo antes de escribir, uno pisaría al otro.
+  const balance = await getBalanceForUpdate(client, walletId, currency);
+
+  const txResult = await client.query<{
+    id: string;
+    created_at: Date;
+  }>(
+    `INSERT INTO transactions
+     (wallet_id, type, from_currency, to_currency, from_amount, to_amount,
+      exchange_rate, fee_amount, fee_currency, fee_rate, rate_source,
+      rate_fetched_at, status)
+    VALUES ($1, 'DEPOSIT', $2, $2, $3, $3, 1, 0, NULL, 0, 'internal',
+            NOW(), 'COMPLETED')
+    RETURNING id, created_at`,
+    [walletId, currency, amount.toFixed(8)]
+  );
+
+  const transactionId = txResult.rows[0].id;
+  const createdAt = txResult.rows[0].created_at.toISOString();
+
+  const balanceAfter = await creditBalance(client, balance, amount);
+
+  // Un solo asiento: entra dinero, no sale nada.
+  await insertTransactionEntry(
+    client,
+    transactionId,
+    balance.id,
+    'CREDIT',
+    'PRINCIPAL',
+    amount,
+    balanceAfter
+  );
+
+  return {
+    transaction: {
+      id: transactionId,
+      type: 'DEPOSIT' as TransactionType,
+      status: 'COMPLETED',
+      fromCurrency: currency,
+      toCurrency: currency,
+      fromAmount: amount.toFixed(8),
+      toAmount: amount.toFixed(8),
+      feeAmount: '0.00000000',
+      feeRate: '0.00000',
+      exchangeRate: '1.00000000',
+      rateSource: 'internal',
+      rateFetchedAt: createdAt,
+      createdAt,
     },
   };
 }
